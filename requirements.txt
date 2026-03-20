@@ -17,6 +17,9 @@ apache-airflow==2.9.1
 # Claude API (conversational agent)
 anthropic==0.34.0
 
+# MCP — Model Context Protocol (independent tool servers)
+mcp==1.0.0
+
 # Logging & utilities
 python-dotenv==1.0.1
 colorlog==6.8.2
