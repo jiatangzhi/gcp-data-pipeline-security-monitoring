@@ -1,0 +1,86 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# docker-compose.yml
+# Runs the full stack locally:
+#   - pipeline: the ETL pipeline (extract → transform → validate → load)
+#   - airflow:  Airflow scheduler + webserver (for DAG-based orchestration)
+#
+# GCP auth: set GOOGLE_APPLICATION_CREDENTIALS to the path of your
+# service account JSON key before running.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ─── Pipeline Service ───────────────────────────────────────────────────────
+  # Runs the standalone pipeline (no Airflow dependency)
+  pipeline:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: security-monitoring-pipeline
+    environment:
+      - PYTHONPATH=/app
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-your-api-key-here}
+      - GCP_PROJECT=${GCP_PROJECT:-my-gcp-project}
+      - BQ_DATASET=${BQ_DATASET:-security_monitoring}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account.json
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+      # Mount your GCP service account key (never commit this file)
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/app/credentials/service-account.json:ro
+    command: python -m src.orchestration.orchestrator
+
+  # ─── Test Runner ────────────────────────────────────────────────────────────
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pipeline-tests
+    environment:
+      - PYTHONPATH=/app
+      - GCP_PROJECT=${GCP_PROJECT:-my-gcp-project}
+      - BQ_DATASET=${BQ_DATASET:-security_monitoring}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/service-account.json
+    volumes:
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/app/credentials/service-account.json:ro
+    command: pytest tests/ -v --tb=short
+    profiles:
+      - test  # Only runs when: docker compose --profile test up test
+
+  # ─── Airflow Standalone ─────────────────────────────────────────────────────
+  # Runs Airflow in standalone mode (scheduler + webserver + database in one container)
+  # Visit http://localhost:8080 after startup (admin/admin)
+  airflow:
+    image: apache/airflow:2.9.1-python3.11
+    container_name: security-monitoring-airflow
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__WEBSERVER__SECRET_KEY=changeme-in-production
+      - PYTHONPATH=/opt/airflow/project
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-your-api-key-here}
+      - GCP_PROJECT=${GCP_PROJECT:-my-gcp-project}
+      - BQ_DATASET=${BQ_DATASET:-security_monitoring}
+      - GOOGLE_APPLICATION_CREDENTIALS=/opt/airflow/credentials/service-account.json
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/project/src
+      - ./logs:/opt/airflow/logs
+      - ${GOOGLE_APPLICATION_CREDENTIALS:-/dev/null}:/opt/airflow/credentials/service-account.json:ro
+    ports:
+      - "8080:8080"
+    command: >
+      bash -c "
+        pip install pandas pyarrow google-cloud-bigquery google-auth requests anthropic &&
+        airflow db init &&
+        airflow users create --username admin --password admin --firstname Admin --lastname User --role Admin --email admin@example.com &&
+        airflow standalone
+      "
+    profiles:
+      - airflow  # Only runs when: docker compose --profile airflow up airflow
+
+volumes:
+  airflow_logs:
