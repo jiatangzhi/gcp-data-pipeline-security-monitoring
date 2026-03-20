@@ -1,0 +1,91 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# cloudbuild.yaml
+# CI/CD pipeline for the GCP Security Monitoring Pipeline.
+#
+# Triggered automatically on push to main branch.
+# Steps: test → build Docker image → push to Artifact Registry → deploy to Cloud Run
+#
+# Setup (one-time):
+#   gcloud builds triggers create github \
+#     --repo-name=gcp-data-pipeline-security-monitoring \
+#     --repo-owner=YOUR_GITHUB_USER \
+#     --branch-pattern=^main$ \
+#     --build-config=cloudbuild.yaml
+# ──────────────────────────────────────────────────────────────────────────────
+
+substitutions:
+  _REGION: us-central1
+  _SERVICE_NAME: security-monitoring-pipeline
+  _DATASET: security_monitoring
+  _REPO: pipeline-repo   # Artifact Registry repository name
+
+steps:
+
+  # ── Step 1: Run unit tests ──────────────────────────────────────────────────
+  # Fails the entire build if any test fails — nothing gets deployed.
+  - name: 'python:3.11-slim'
+    id: 'run-tests'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --quiet \
+          pandas==2.2.2 \
+          numpy==1.26.4 \
+          pyarrow==16.1.0 \
+          google-cloud-bigquery==3.25.0 \
+          google-auth==2.30.0 \
+          requests==2.31.0 \
+          anthropic==0.34.0 \
+          pytest==8.2.2 \
+          pytest-cov==5.0.0
+        pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
+
+  # ── Step 2: Build Docker image ──────────────────────────────────────────────
+  # Tags the image with both the git commit SHA (immutable) and 'latest'.
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
+    waitFor: ['run-tests']
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}:$COMMIT_SHA'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}:latest'
+      - '.'
+
+  # ── Step 3: Push image to Artifact Registry ─────────────────────────────────
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
+    waitFor: ['build-image']
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}'
+
+  # ── Step 4: Deploy to Cloud Run ─────────────────────────────────────────────
+  # Uses the commit-SHA tagged image so every deploy is traceable to a commit.
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
+    waitFor: ['push-image']
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}:$COMMIT_SHA'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--set-env-vars=GCP_PROJECT=$PROJECT_ID,BQ_DATASET=${_DATASET}'
+      - '--no-allow-unauthenticated'   # Require auth in production
+      - '--quiet'
+
+# ── Final image stored in Artifact Registry ────────────────────────────────────
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}:$COMMIT_SHA'
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE_NAME}:latest'
+
+# ── Build options ──────────────────────────────────────────────────────────────
+options:
+  logging: CLOUD_LOGGING_ONLY   # Send logs to Cloud Logging, not GCS
+  machineType: 'E2_MEDIUM'      # Enough CPU for the test + build steps
