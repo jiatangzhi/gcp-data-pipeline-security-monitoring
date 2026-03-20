@@ -86,6 +86,37 @@ def execute_sql(sql: str) -> str:
         return f"ERROR: {str(e)}"
 
 
+def run_ml_prediction(model: str) -> str:
+    """
+    Run a BigQuery ML prediction and return the result as a formatted string.
+    Trains the model on first use if it doesn't exist yet.
+    """
+    from src.ml.bqml import BQMLModels
+    try:
+        ml = BQMLModels()
+        if model == "login_anomalies":
+            ml.train_login_anomaly_model()
+            df = ml.predict_login_anomalies()
+        elif model == "user_risk":
+            ml.train_risk_classifier()
+            df = ml.predict_user_risk()
+        elif model == "evaluate":
+            df = ml.evaluate_risk_classifier()
+        elif model == "centroids":
+            df = ml.get_cluster_centroids()
+        else:
+            return f"Unknown model: {model}. Choose: login_anomalies, user_risk, evaluate, centroids"
+
+        if df.empty:
+            return "Model returned no results. Run the pipeline first to populate the aggregated tables."
+        if len(df) > MAX_RESULT_ROWS:
+            df = df.head(MAX_RESULT_ROWS)
+        return df.to_string(index=False)
+    except Exception as e:
+        logger.error(f"ML prediction error: {e}")
+        return f"ERROR: {str(e)}"
+
+
 def list_available_tables() -> str:
     """Return a list of tables available in the BigQuery dataset."""
     try:
@@ -134,6 +165,27 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "predict_risk",
+        "description": (
+            "Run BigQuery ML models to score security risk. "
+            "Use 'login_anomalies' to cluster daily login behaviour and detect anomalous days. "
+            "Use 'user_risk' to score each suspicious user with a high-risk probability (0-1). "
+            "Use 'evaluate' to get classifier metrics (precision, recall, F1). "
+            "Use 'centroids' to inspect K-Means cluster centres."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "string",
+                    "enum": ["login_anomalies", "user_risk", "evaluate", "centroids"],
+                    "description": "Which ML prediction to run.",
+                }
+            },
+            "required": ["model"],
+        },
+    },
 ]
 
 SYSTEM_PROMPT = f"""You are a data analyst assistant for a cybersecurity and analytics pipeline.
@@ -150,11 +202,18 @@ You have access to a Google BigQuery dataset with these tables (use fully qualif
 - `{PROJECT_ID}.{DATASET_ID}.agg_sales_per_region`  — total sales by region
 - `{PROJECT_ID}.{DATASET_ID}.agg_suspicious_users`  — users with repeated failed logins
 
+You also have access to BigQuery ML models via the predict_risk tool:
+- login_anomalies — K-Means clustering on daily login behaviour (detects anomalous days)
+- user_risk       — Logistic regression scoring each suspicious user (0-1 probability)
+- evaluate        — Classifier metrics: precision, recall, F1
+- centroids       — K-Means cluster centres for interpretability
+
 Rules:
 1. Always use fully qualified BigQuery table names: `project.dataset.table`
 2. Use SELECT queries only — never modify data.
 3. Be concise but explain your findings clearly.
 4. If asked about suspicious users or security threats, prioritise clarity.
+5. Use predict_risk when the user asks about risk scores, anomalies, or ML predictions.
 """
 
 
@@ -221,6 +280,8 @@ def run_agent(user_question: str, api_key: str = None) -> str:
                         result = execute_sql(block.input.get("sql", ""))
                     elif block.name == "list_tables":
                         result = list_available_tables()
+                    elif block.name == "predict_risk":
+                        result = run_ml_prediction(block.input.get("model", ""))
                     else:
                         result = f"Unknown tool: {block.name}"
 
